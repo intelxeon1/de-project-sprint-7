@@ -5,7 +5,7 @@ import pyspark.sql.functions as F
 from pyspark import SparkConf, SparkContext
 from pyspark.sql import SQLContext
 from pyspark.sql.window import Window
-from .const import r,cities_tz,rec_dist,Mart_Paths
+from .const import r,cities_tz,rec_dist,home_depth,Mart_Paths
 
 
 def main():
@@ -50,16 +50,17 @@ def main():
         all_events_agg = all_events_with_city.select(['user','date','city','tz']).distinct()
         
         window_usr_date =  Window().partitionBy(['user']).orderBy(F.asc('date'))
-        events_with_next = all_events_agg.withColumns({"next_city":F.lead('city',1).over(window_usr_date),\
-                                                    'next_date':F.lead('date',1).over(window_usr_date)}). \
-                                                        filter(F.col('next_city').isNull() | (F.col('city') != F.col('next_city')) )
+        
+        events_with_next = all_events_agg.withColumn("next_city",F.lead('city',1).over(window_usr_date))\
+                                            .filter(F.col('next_city').isNull() | (F.col('city') != F.col('next_city')) ) \
+                                            .withColumn('next_date',F.lead('date',1).over(window_usr_date))
                                                     
         cities_array = events_with_next.select(['user','city']).orderBy(F.asc('date')).groupBy('user'). \
             agg(F.collect_list('city').alias('travel_array')) \
             .withColumn('travel_count',F.size(F.col('travel_array')))
         
         window_usr_date_desc = Window().partitionBy(['user']).orderBy(F.desc('date'))
-        home_cities = events_with_next.withColumn("date_diff",F.datediff(F.col('next_date'),F.col('date'))).filter(F.col('date_diff') >= 3). \
+        home_cities = events_with_next.withColumn("date_diff",F.datediff(F.col('next_date'),F.col('date'))).filter(F.col('date_diff') >= home_depth). \
             withColumn('row_num',F.row_number().over(window_usr_date_desc)).filter(F.col('row_num')==1).select(['user',F.col('city').alias('home_city')])
             
         
@@ -80,7 +81,9 @@ def main():
         window_reg = Window().partitionBy(['user','zone_id']).orderBy(F.asc('dt'))
         window_month = Window().partitionBy('zone_id','month')
         
-        registration_df = zone_df_temp.filter(F.col('event_type')== F.lit('message')).withColumn("row_number",F.row_number().over(window_reg))
+        registration_df = zone_df_temp.filter(F.col('event_type')== F.lit('message')) \
+            .withColumn("row_number",F.row_number().over(window_reg)) \
+            .filter(F.col('row_number') == F.lit('1'))
         
         mart_reg = registration_df.withColumn("month",F.concat(F.year(F.col("dt")),F.format_string("%02d",F.month(F.col("dt"))))) \
                 .withColumn("week",F.weekofyear(F.col("dt"))) \
@@ -134,7 +137,7 @@ def main():
                 F.cos(F.col('lat_rad1'))*F.cos(F.col('lat_rad2'))* \
                 F.pow( (F.sin(F.col('lon_rad1')-F.col('lon_rad2'))) / F.lit(2),2) \
                 )) \
-            ).filter(F.col('distance') < 50) \
+            ).filter(F.col('distance') < rec_dist) \
             .join(mart_usr,how='left',on=F.col('user1') == mart_usr['user_id']) \
             .join(cities,how='left',on=F.col('act_city')==cities['city'] ) \
             .withColumn('processed_dttm',F.date_trunc('second',F.current_timestamp())) \
@@ -142,9 +145,9 @@ def main():
         
     mart_rec = calc_rec_mar()
     
-    mart_usr.parquet.write(path=f"{base_output_path}/{Mart_Paths.usr}-{dt}-{depth}",mode='overwrite')
-    mart_rec.parquet.write(path=f"{base_output_path}/{Mart_Paths.rec}-{dt}-{depth}",mode='overwrite')
-    mart_zone.parquet.write(path=f"{base_output_path}/{Mart_Paths.zone}-{dt}-{depth}",mode='overwrite')
+    mart_usr.write.parquet(path=f"{base_output_path}/{Mart_Paths.usr}-{dt}-{depth}",mode='overwrite')
+    mart_rec.write.parquet(path=f"{base_output_path}/{Mart_Paths.rec}-{dt}-{depth}",mode='overwrite')
+    mart_zone.write.parquet(path=f"{base_output_path}/{Mart_Paths.zone}-{dt}-{depth}",mode='overwrite')
         
 
 
